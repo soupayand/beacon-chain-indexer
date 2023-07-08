@@ -259,18 +259,18 @@ func (s *Service) FetchAggregationBits(startingSlot int64) map[string]string {
 			logger.LogError(err)
 			continue
 		}
-
-		if response.StatusCode == 404 {
-			logger.LogInfo("Slot number ", slot, " was missed")
-			continue
-
-		}
 		defer func(Body io.ReadCloser) {
 			err := Body.Close()
 			if err != nil {
 				logger.LogError(err)
 			}
 		}(response.Body)
+
+		if response.StatusCode == 404 {
+			logger.LogInfo("Slot number ", slot, " was missed")
+			continue
+
+		}
 
 		dec := json.NewDecoder(response.Body)
 		dec.UseNumber()
