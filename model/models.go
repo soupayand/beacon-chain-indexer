@@ -54,7 +54,6 @@ type Committee struct {
 
 type Participation struct {
 	ParticipationFactor float64 `json:"participation_factor"`
-	ActualAttestations  int     `json:"actual_attestions"`
 	MissedAttestations  int     `json:"missed_attestations"`
 	ValidatorSetSize    int     `json:"validator_set_size"`
 }

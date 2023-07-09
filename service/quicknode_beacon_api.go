@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"go-beacon-chain-indexer/db"
@@ -21,19 +22,43 @@ const (
 )
 
 type Service struct {
-	db *db.Database
+	db     *db.Database
+	client *http.Client
+}
+
+type Counter struct {
+	value int
+	mutex sync.Mutex
+}
+
+func NewCounter() *Counter {
+	return &Counter{}
 }
 
 func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{
 		db: db.NewDatabase(pool),
+		client: &http.Client{
+			Transport: &http.Transport{
+				MaxIdleConns:        10,               // Set the maximum number of idle connections in the pool
+				IdleConnTimeout:     30 * time.Second, // Set the maximum idle connection timeout
+				MaxIdleConnsPerHost: 10,               // Set the maximum number of idle connections per host
+			},
+		},
 	}
 }
 
 /*
 This method loads the epoch indexed data by fetching them from external API and loading them to the database
 */
-func (s *Service) Run() error {
+func (s *Service) Run() {
+	err := indexEpochData(s)
+	if err != nil {
+		logger.LogError(errors.New("Error encountered while indexing epoch data from quicnode api"))
+	}
+}
+
+func indexEpochData(s *Service) error {
 	err := s.db.DeleteData()
 	if err != nil {
 		logger.LogError(err)
@@ -82,7 +107,7 @@ This method fetches the latest finalized slot number
 func (s *Service) fetchLatestSlot() (int64, error) {
 	url := "https://wiser-side-morning.discover.quiknode.pro/eth/v1/beacon/headers/finalized" // Replace with the actual endpoint
 
-	response, err := http.Get(url)
+	response, err := s.client.Get(url)
 	if err != nil {
 		logger.LogError(err)
 		return 0, err
@@ -109,8 +134,7 @@ This method fetches the header data for a specific slot
 */
 func (s *Service) fetchBeaconData(slotNumber int64) (*model.BeaconChainData, error) {
 	url := fmt.Sprintf("https://wiser-side-morning.discover.quiknode.pro/eth/v1/beacon/headers/%v", slotNumber)
-
-	response, err := http.Get(url)
+	response, err := s.client.Get(url)
 	if err != nil {
 		logger.LogError(err)
 		return nil, err
@@ -121,42 +145,14 @@ func (s *Service) fetchBeaconData(slotNumber int64) (*model.BeaconChainData, err
 			logger.LogError(err)
 		}
 	}(response.Body)
-
 	if response.StatusCode == 404 {
 		logger.LogInfo("Slot number ", slotNumber, " was missed")
 		return nil, nil
 	}
-
 	var beaconData model.BeaconChainData
 	err = json.NewDecoder(response.Body).Decode(&beaconData)
 
 	return &beaconData, nil
-}
-
-/*
-This method calculates the epoch number from the slot number
-*/
-func getEpochNumber(slotNumber int64) int64 {
-	var slotPerEpoch, _ = strconv.ParseInt(os.Getenv("SLOTS_PER_EPOCH"), 10, 32)
-	epochNumber := slotNumber / slotPerEpoch
-	return epochNumber
-}
-
-/*
-This method determines the starting slot number in in that epoch from the supplied slot number
-*/
-func getStartingSlotNumber(currentSlotNumber int64) int64 {
-	var epochCount, _ = strconv.ParseInt(os.Getenv("EPOCH_COUNT"), 10, 32)
-	var slotPerEpoch, _ = strconv.ParseInt(os.Getenv("SLOTS_PER_EPOCH"), 10, 32)
-	currentEpoch := currentSlotNumber / slotPerEpoch
-	startingEpoch := currentEpoch - epochCount + 1
-	startingSlotNumber := startingEpoch * slotPerEpoch
-	return startingSlotNumber
-}
-func (s *Service) GetSlotRange(epoch int64) (int64, int64) {
-	startSlot := epoch * 32
-	endSlot := startSlot + 32 - 1
-	return startSlot, endSlot
 }
 
 /*
@@ -177,30 +173,42 @@ This method fetches the no of validators in a specific validator set
 func (s *Service) FetchTotalNumberOfValidators(epoch int64) map[string]int {
 	logger.LogInfo("Fetching committees for epoch %v", epoch)
 	indexToValidators := make(map[string]int)
-	response, err := http.Get(fmt.Sprintf("https://wiser-side-morning.discover.quiknode.pro/eth/v1/beacon/states/finalized/committees?epoch=%v", epoch)) // Replace with the actual API endpoint
+	response, err := s.client.Get(fmt.Sprintf("https://wiser-side-morning.discover.quiknode.pro/eth/v1/beacon/states/finalized/committees?epoch=%v", epoch))
 	if err != nil {
 		logger.LogError(err)
-
+		return nil
 	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			logger.LogError(err)
-		}
-	}(response.Body)
-
+	defer response.Body.Close()
 	dec := json.NewDecoder(response.Body)
-	var committeeData struct {
-		Data []model.Committee `json:"data"`
-	}
-
+	dec.UseNumber()
+	committeeData := make(map[string]interface{})
 	err = dec.Decode(&committeeData)
 	if err != nil {
 		logger.LogError(err)
-
+		return nil
 	}
-	for _, committee := range committeeData.Data {
-		indexToValidators[committee.Index] = len(committee.Validators)
+	data, ok := committeeData["data"].([]interface{})
+	if !ok {
+		logger.LogError(errors.New("data field is not an array"))
+		return nil
+	}
+	for _, item := range data {
+		committee, ok := item.(map[string]interface{})
+		if !ok {
+			logger.LogError(errors.New("invalid committee object"))
+			continue
+		}
+		index, ok := committee["index"].(string)
+		if !ok {
+			logger.LogError(errors.New("invalid index value"))
+			continue
+		}
+		validators, ok := committee["validators"].([]interface{})
+		if !ok {
+			logger.LogError(errors.New("invalid validators value"))
+			continue
+		}
+		indexToValidators[index] = len(validators)
 	}
 	return indexToValidators
 }
@@ -213,7 +221,6 @@ func (s *Service) FetchValidatorInfo(epoch int64, validatorIndex string) (string
 	response, err := http.Get(fmt.Sprintf("https://wiser-side-morning.discover.quiknode.pro/eth/v1/beacon/states/finalized/committees?epoch=%v", epoch)) // Replace with the actual API endpoint
 	if err != nil {
 		logger.LogError(err)
-
 	}
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
@@ -221,7 +228,6 @@ func (s *Service) FetchValidatorInfo(epoch int64, validatorIndex string) (string
 			logger.LogError(err)
 		}
 	}(response.Body)
-
 	dec := json.NewDecoder(response.Body)
 	var committeeData struct {
 		Data []model.Committee `json:"data"`
@@ -250,43 +256,146 @@ This method fetches the aggregation_bits string based on each index in a slot
 */
 func (s *Service) FetchAggregationBits(startingSlot int64) map[string]string {
 	logger.LogInfo("Fetching attestation bits for %v", startingSlot)
-	indexToAggregationBits := make(map[string]string)
+	indexToAggregationBits := sync.Map{} // Thread-safe map
 	slotPerEpoch, _ := strconv.ParseInt(os.Getenv("SLOTS_PER_EPOCH"), 10, 64)
 	endSlot := startingSlot + slotPerEpoch
+	rateLimiter := time.Tick(time.Second / 25)
+	var wg sync.WaitGroup
 	for slot := startingSlot; slot < endSlot; slot++ {
-		response, err := http.Get(fmt.Sprintf("https://wiser-side-morning.discover.quiknode.pro/eth/v1/beacon/blocks/%v/attestations", slot)) // Replace with the actual API endpoint
-		if err != nil {
-			logger.LogError(err)
-			continue
-		}
-		defer func(Body io.ReadCloser) {
-			err := Body.Close()
+		<-rateLimiter
+		wg.Add(1)
+		go func(slot int64) {
+			defer wg.Done()
+			response, err := s.client.Get(fmt.Sprintf("https://wiser-side-morning.discover.quiknode.pro/eth/v1/beacon/blocks/%v/attestations", slot)) // Replace with the actual API endpoint
 			if err != nil {
 				logger.LogError(err)
+				return
 			}
-		}(response.Body)
+			defer func(Body io.ReadCloser) {
+				err := Body.Close()
+				if err != nil {
+					logger.LogError(err)
+				}
+			}(response.Body)
 
-		if response.StatusCode == 404 {
-			logger.LogInfo("Slot number ", slot, " was missed")
-			continue
+			if response.StatusCode == 404 {
+				logger.LogInfo("Slot number ", slot, " was missed")
+				return
+			}
 
+			dec := json.NewDecoder(response.Body)
+			dec.UseNumber()
+
+			var attestationData struct {
+				Data []model.Attestation `json:"data"`
+			}
+
+			err = dec.Decode(&attestationData)
+			if err != nil {
+				logger.LogError(err)
+				return
+			}
+
+			for _, attestation := range attestationData.Data {
+				indexToAggregationBits.Store(attestation.Details.Index, attestation.AggregationBits)
+			}
+		}(slot)
+	}
+
+	go func() {
+		wg.Wait()
+	}()
+
+	result := make(map[string]string)
+	indexToAggregationBits.Range(func(key, value interface{}) bool {
+		result[key.(string)] = value.(string)
+		return true
+	})
+	return result
+}
+
+func (s *Service) FetchValidatorSetSize() (int, error) {
+	url := "https://wiser-side-morning.discover.quiknode.pro/eth/v1/beacon/states/head/validators?status=active_ongoing" // Replace with the actual API endpoint
+	response, err := http.Get(url)
+	if err != nil {
+		logger.LogError(err)
+		return 0, err
+	}
+	defer response.Body.Close()
+	var wg sync.WaitGroup
+	counter := NewCounter()
+	decoder := json.NewDecoder(response.Body)
+	for {
+		tok, err := decoder.Token()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			logger.LogError(err)
+			return 0, err
 		}
 
-		dec := json.NewDecoder(response.Body)
-		dec.UseNumber()
-
-		var attestationData struct {
-			Data []model.Attestation `json:"data"`
-		}
-
-		err = dec.Decode(&attestationData)
-		if err != nil {
-			fmt.Printf("Failed to decode JSON response: %v\n", err)
-
-		}
-		for _, attestation := range attestationData.Data {
-			indexToAggregationBits[attestation.Details.Index] = attestation.AggregationBits
+		if tok == "data" {
+			break
 		}
 	}
-	return indexToAggregationBits
+	var data []interface{}
+	err = decoder.Decode(&data)
+	if err != nil {
+		logger.LogError(err)
+		return 0, err
+	}
+	for _, obj := range data {
+		wg.Add(1)
+		go func(obj interface{}) {
+			defer wg.Done()
+
+			_, ok := obj.(map[string]interface{})
+			if !ok {
+				return
+			}
+			counter.Increment()
+		}(obj)
+	}
+	wg.Wait()
+	return counter.Value(), nil
+}
+
+// Increment increments the counter by 1
+func (c *Counter) Increment() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.value++
+}
+
+// Value returns the current value of the counter
+func (c *Counter) Value() int {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.value
+}
+
+/*
+This method calculates the epoch number from the slot number
+*/
+func getEpochNumber(slotNumber int64) int64 {
+	var slotPerEpoch, _ = strconv.ParseInt(os.Getenv("SLOTS_PER_EPOCH"), 10, 32)
+	epochNumber := slotNumber / slotPerEpoch
+	return epochNumber
+}
+
+/*
+This method determines the starting slot number in in that epoch from the supplied slot number
+*/
+func getStartingSlotNumber(currentSlotNumber int64) int64 {
+	var epochCount, _ = strconv.ParseInt(os.Getenv("EPOCH_COUNT"), 10, 32)
+	var slotPerEpoch, _ = strconv.ParseInt(os.Getenv("SLOTS_PER_EPOCH"), 10, 32)
+	currentEpoch := currentSlotNumber / slotPerEpoch
+	startingEpoch := currentEpoch - epochCount + 1
+	startingSlotNumber := startingEpoch * slotPerEpoch
+	return startingSlotNumber
+}
+func (s *Service) GetSlotRange(epoch int64) (int64, int64) {
+	startSlot := epoch * 32
+	endSlot := startSlot + 32 - 1
+	return startSlot, endSlot
 }

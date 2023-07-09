@@ -37,78 +37,70 @@ func (p *ParticipationController) GetParticipationRate(w http.ResponseWriter, r 
 	if params == nil {
 		return
 	}
-
 	latestEpochNumber, err := p.s.FetchLatestEpochNumber()
 	if err != nil {
 		handleInternalServerError(err, w)
 		return
 	}
-
+	validatorSetSize, err := p.s.FetchValidatorSetSize()
+	if err != nil {
+		logger.LogError(errors.New("Error fetching finalized validator set size"))
+		return
+	}
 	noOfEpochs, _ := strconv.ParseInt(params["epoch"], 10, 64)
 	if noOfEpochs == 0 {
 		noOfEpochs = 1
 	}
-
 	validatorIndex := params["validatorIndex"]
 	startingEpochNumber := latestEpochNumber - noOfEpochs + 1
-
 	slotsPerEpoch, _ := strconv.ParseInt(os.Getenv("SLOTS_PER_EPOCH"), 10, 64)
-	totalValidators := 0
+	votingValidators := 0
 	missed := 0
 	participated := 0
-
 	for epoch := startingEpochNumber; epoch <= latestEpochNumber; epoch++ {
 		if validatorIndex != "" {
 			m, pr := calculateValidatorParticipationRate(p.s, epoch, validatorIndex)
 			missed += m
 			participated += pr
 		} else {
-			m, pr, t := calculateParticipationInEpoch(p.s, epoch)
+			m, t := calculateParticipationInEpoch(p.s, epoch)
 			missed += m
-			participated += pr
-			totalValidators += t
+			votingValidators += t
 		}
 	}
 
 	participationFactor := float64(1)
 	if validatorIndex != "" {
 		participationFactor = float64(missed) / (float64(noOfEpochs) * float64(slotsPerEpoch))
-	} else if totalValidators > 0 {
-		participationFactor = 1 - (float64(missed) / (float64(noOfEpochs) * float64(slotsPerEpoch) * float64(totalValidators)))
+	} else if votingValidators > 0 {
+		participationFactor = 1 - (float64(missed) / (float64(noOfEpochs) * float64(slotsPerEpoch) * float64(validatorSetSize)))
 	}
 
 	participation := model.Participation{
 		MissedAttestations:  missed,
-		ActualAttestations:  participated,
 		ParticipationFactor: participationFactor,
-		ValidatorSetSize:    totalValidators,
+		ValidatorSetSize:    validatorSetSize,
 	}
-
 	err = json.NewEncoder(w).Encode(participation)
 	if err != nil {
 		handleInternalServerError(err, w)
 	}
 }
 
-func calculateParticipationInEpoch(s *service.Service, epoch int64) (int, int, int) {
+func calculateParticipationInEpoch(s *service.Service, epoch int64) (int, int) {
 	validators := s.FetchTotalNumberOfValidators(epoch)
 	startingSlot, _ := s.GetSlotRange(epoch)
 	startingSlot++
 	aggregationBits := s.FetchAggregationBits(startingSlot)
-
-	missed := 0
-	participated := 0
-	totalValidators := 0
-
+	missedAttestations := 0
+	totalVotingValidators := 0
 	for index, bits := range aggregationBits {
-		validatorsInCommittee := validators[index]
-		totalValidators += validatorsInCommittee
-		m, pr := missedAttestations(bits, validatorsInCommittee)
-		missed += m
-		participated += pr
+		validatorSetSize := validators[index]
+		totalVotingValidators += validatorSetSize
+		m := calculateMissedAttestationCount(bits, validatorSetSize)
+		missedAttestations += m
 	}
-
-	return missed, participated, totalValidators
+	return missedAttestations, totalVotingValidators
 }
 
 func calculateValidatorParticipationRate(s *service.Service, epoch int64, validatorIndex string) (int, int) {
@@ -116,10 +108,8 @@ func calculateValidatorParticipationRate(s *service.Service, epoch int64, valida
 	startingSlot, _ := s.GetSlotRange(epoch)
 	startingSlot++
 	aggregationBits := s.FetchAggregationBits(startingSlot)
-
 	missed := 0
 	participated := 0
-
 	for index, bits := range aggregationBits {
 		if index == committeeIndex {
 			bitValue := getValidatorAttestationBit(bits, positionInIndex)
@@ -142,29 +132,23 @@ func calculateValidatorParticipationRate(s *service.Service, epoch int64, valida
 This function fetches the no of 0s and 1s in aggregation_bits string in a specific slot.
 These no of occurrences determine the no of participated and missed attestations
 */
-func missedAttestations(aggBitsHex string, validatorSetSize int) (int, int) {
+func calculateMissedAttestationCount(aggBitsHex string, validatorSetSize int) int {
 	decoded, err := hex.DecodeString(aggBitsHex[2:])
 	if err != nil {
 		logger.LogError(err)
-		return 0, 0
+		return 0
 	}
-
 	countZeros := 0
-	countOnes := 0
-
 	for i := 0; i < validatorSetSize; i++ {
 		byteIndex := i / 8
 		bitIndex := i % 8
 		bit := (decoded[byteIndex] >> (7 - bitIndex)) & 0x01
-
 		if bit == 0 {
 			countZeros++
-		} else {
-			countOnes++
 		}
 	}
 
-	return countZeros, countOnes
+	return countZeros
 }
 
 func getValidatorAttestationBit(aggBitsHex string, committeePos int) string {

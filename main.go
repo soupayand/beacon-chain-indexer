@@ -35,10 +35,7 @@ func main() {
 	var s = service.NewService(pool)
 	go func() {
 		logger.LogInfo("Starting data load service for fetching last 5 epoch data")
-		err = s.Run()
-		if err != nil {
-			logger.LogError(err)
-		}
+		s.Run()
 		logger.LogInfo("Loaded data for last 5 epoch")
 	}()
 
