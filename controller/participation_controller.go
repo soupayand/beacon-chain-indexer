@@ -63,7 +63,7 @@ func (p *ParticipationController) GetParticipationRate(w http.ResponseWriter, r 
 			missed += m
 			participated += pr
 		} else {
-			m, pr, t := calculateTotalParticipationRate(p.s, epoch)
+			m, pr, t := calculateParticipationInEpoch(p.s, epoch)
 			missed += m
 			participated += pr
 			totalValidators += t
@@ -81,6 +81,7 @@ func (p *ParticipationController) GetParticipationRate(w http.ResponseWriter, r 
 		MissedAttestations:  missed,
 		ActualAttestations:  participated,
 		ParticipationFactor: participationFactor,
+		ValidatorSetSize:    totalValidators,
 	}
 
 	err = json.NewEncoder(w).Encode(participation)
@@ -89,7 +90,7 @@ func (p *ParticipationController) GetParticipationRate(w http.ResponseWriter, r 
 	}
 }
 
-func calculateTotalParticipationRate(s *service.Service, epoch int64) (int, int, int) {
+func calculateParticipationInEpoch(s *service.Service, epoch int64) (int, int, int) {
 	validators := s.FetchTotalNumberOfValidators(epoch)
 	startingSlot, _ := s.GetSlotRange(epoch)
 	startingSlot++
@@ -148,18 +149,15 @@ func missedAttestations(aggBitsHex string, validatorSetSize int) (int, int) {
 		return 0, 0
 	}
 
-	binary := make([]byte, validatorSetSize)
 	countZeros := 0
 	countOnes := 0
 
-	for i, b := range decoded {
-		if i >= validatorSetSize {
-			break
-		}
+	for i := 0; i < validatorSetSize; i++ {
+		byteIndex := i / 8
+		bitIndex := i % 8
+		bit := (decoded[byteIndex] >> (7 - bitIndex)) & 0x01
 
-		binary[i] = byte((b >> 7) & 0x01)
-
-		if binary[i] == 0 {
+		if bit == 0 {
 			countZeros++
 		} else {
 			countOnes++
