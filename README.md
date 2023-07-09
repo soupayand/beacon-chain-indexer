@@ -8,10 +8,10 @@
 5. Upon Starting the data from last 5 finalized epoch would be indexed/loaded into the beacon_chain_data table.
 
 # **API endpoints**:
-GET : /data => This can be used to fetch all the indexed data from the database and filtered on any one of the fields at a time
-GET : /data?epoch=${EPOCH_NUMBER}&slot={$SLOT_NUMBER}&unix_time=${UNIX_TIME} => This endpoint can be used to filter the indexed data on any one of the fields
-GET : /participation-rate?epoch=${NO_OF_EPOCHS} => This endpoint can be used to fetch the total participation rate of the validators over the specific no of epochs
-GET : /participation-rate?epoch=${NO_OF_EPOCHS}&validatorIndex=${INDEX_OF_VALIDATOR} => This can be used to fetch the participation rate for a particular validator over the specific no of epochs
+1. GET : /data => This can be used to fetch all the indexed data from the database and filtered on any one of the fields at a time
+2. GET : /data?epoch=${EPOCH_NUMBER}&slot={$SLOT_NUMBER}&unix_time=${UNIX_TIME} => This endpoint can be used to filter the indexed data on any one of the fields
+3. GET : /participation-rate?epoch=${NO_OF_EPOCHS} => This endpoint can be used to fetch the total participation rate of the validators over the specific no of epochs
+4. GET : /participation-rate?epoch=${NO_OF_EPOCHS}&validatorIndex=${INDEX_OF_VALIDATOR} => This can be used to fetch the participation rate for a particular validator over the specific no of epochs
 
 # **Considerations**:
 1. Since this was a small project the functionality has been given priority of performance. While performance isn't necessarily poor, it could be optimised nonetheless.
