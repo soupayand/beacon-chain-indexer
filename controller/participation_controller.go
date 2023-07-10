@@ -37,21 +37,21 @@ func (p *ParticipationController) GetParticipationRate(w http.ResponseWriter, r 
 	if params == nil {
 		return
 	}
-	latestEpochNumber, err := p.s.FetchLatestEpochNumber()
-	if err != nil {
-		handleInternalServerError(err, w)
-		return
-	}
-	validatorSetSize, err := p.s.FetchValidatorSetSize()
-	if err != nil {
-		logger.LogError(errors.New("Error fetching finalized validator set size"))
-		return
-	}
+	latestEpochNumberCh := make(chan int64)
+	validatorSetSizeCh := make(chan int)
+	go func() {
+		latestEpochNumber, err := p.s.FetchLatestEpochNumber()
+		if err != nil {
+			logger.LogError(err)
+		}
+		latestEpochNumberCh <- latestEpochNumber
+	}()
 	noOfEpochs, _ := strconv.ParseInt(params["epoch"], 10, 64)
 	if noOfEpochs == 0 {
 		noOfEpochs = 1
 	}
 	validatorIndex := params["validatorIndex"]
+	latestEpochNumber := <-latestEpochNumberCh
 	startingEpochNumber := latestEpochNumber - noOfEpochs + 1
 	slotsPerEpoch, _ := strconv.ParseInt(os.Getenv("SLOTS_PER_EPOCH"), 10, 64)
 	votingValidators := 0
@@ -70,6 +70,15 @@ func (p *ParticipationController) GetParticipationRate(w http.ResponseWriter, r 
 	}
 
 	participationFactor := float64(1)
+	go func() {
+		validatorSetSize, err := p.s.FetchValidatorSetSize()
+		if err != nil {
+			logger.LogError(errors.New("Error fetching finalized validator set size"))
+			return
+		}
+		validatorSetSizeCh <- validatorSetSize
+	}()
+	validatorSetSize := <-validatorSetSizeCh
 	if validatorIndex != "" {
 		participationFactor = float64(missed) / (float64(noOfEpochs) * float64(slotsPerEpoch))
 	} else if votingValidators > 0 {
@@ -81,7 +90,7 @@ func (p *ParticipationController) GetParticipationRate(w http.ResponseWriter, r 
 		ParticipationFactor: participationFactor,
 		ValidatorSetSize:    validatorSetSize,
 	}
-	err = json.NewEncoder(w).Encode(participation)
+	err := json.NewEncoder(w).Encode(participation)
 	if err != nil {
 		handleInternalServerError(err, w)
 	}
