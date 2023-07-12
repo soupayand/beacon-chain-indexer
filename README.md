@@ -15,7 +15,7 @@
 
 # **Considerations**:
 1. Since this was a small project the functionality has been given priority of performance. While performance isn't necessarily poor, it could be optimised nonetheless.
-2. There is scope of using go routines to fetch the participation-rate data from the Quicknode APIs for faster retrieval.
+2. To facilitate higher performance, Go routines have been used to fetch data from the quicknode APIs.
 3. Only 25 requests/second is currently allowed by Quicknode in the free plan, so rate limits had to be put even where go routines were used to fetch data.
 4. Another optimisation mechanism could be to fetch and store the participation data in the database and use queries to generate the desired output.
 5. Caching can be used for the participation-rates which when determined for a particular epoch can be stored and quickly retrieved.
